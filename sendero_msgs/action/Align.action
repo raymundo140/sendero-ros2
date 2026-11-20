@@ -1,0 +1,52 @@
+# Align.action — precision alignment to a perceived target (Sendero)
+#
+# Moves the robot base to an exact pose relative to a target (a box, a
+# pallet, a shelf slot, an ArUco marker), for example before a forklift
+# pickup or placement. Run it after NavigateToPose has brought the robot
+# close (within align_max_start_distance of the final pose).
+
+#goal definition
+# Live target: a geometry_msgs/PoseStamped topic published by perception.
+# Empty = use target_pose below as a fixed target.
+string target_topic
+# Fixed target (target_topic empty), or an optional first estimate of the
+# live target (header.frame_id empty = none).
+geometry_msgs/PoseStamped target_pose
+# Desired pose of the robot base expressed in the target frame.
+# Example: target x axis pointing out of the box front, robot 0.30 m in
+# front of it and facing it -> position (0.30, 0, 0), yaw pi.
+geometry_msgs/Pose robot_pose_in_target
+# Overrides; 0 (or false) = use the configured default.
+float32 xy_tolerance        # [m]
+float32 yaw_tolerance       # [rad]
+float32 max_linear_speed    # [m/s]
+float32 time_allowance      # [s]
+bool forward_only           # true = never drive backward while aligning
+# Navigation profile (footprint, limits) to use; empty = keep the active one.
+string profile
+---
+#result definition
+uint16 NONE=0
+uint16 UNKNOWN=1000
+uint16 TARGET_NOT_FOUND=1001
+uint16 TARGET_LOST=1002
+uint16 TOO_FAR=1003
+uint16 TIMEOUT=1004
+uint16 COLLISION_AHEAD=1005
+uint16 TF_ERROR=1006
+uint16 INVALID_INPUT=1007
+uint16 FAILED_TO_CONVERGE=1008
+
+uint16 error_code
+string error_msg
+# Final errors of the robot in the desired-pose frame.
+float32 longitudinal_error  # [m] along the approach direction
+float32 lateral_error       # [m]
+float32 yaw_error           # [rad]
+---
+#feedback definition
+string phase                # APPROACH | DOCK | ROTATE
+float32 longitudinal_error
+float32 lateral_error
+float32 yaw_error
+float32 target_age          # [s] since the last target measurement

@@ -1,0 +1,398 @@
+# =============================================================================
+# sendero.yaml — Sendero navigation framework
+# =============================================================================
+# The ONLY file to edit when moving Sendero to another robot.
+#
+# What Sendero needs from your system:
+#   1. a SLAM (or map server) publishing nav_msgs/OccupancyGrid     (map_topic)
+#   2. TF: <global_frame> -> <odom_frame> -> <robot_base_frame> -> <laser frame>
+#   3. one or more sensor_msgs/LaserScan topics                     (scan_topics)
+#   4. a base controller that executes geometry_msgs/Twist          (cmd_vel_topic)
+# What it offers:
+#   nav2_msgs/action/NavigateToPose   (Nav2-compatible: Frontera, RViz, ...)
+#   nav2_msgs/action/ComputePathToPose, nav2_msgs/action/BackUp
+#   sendero_msgs/action/Align         (precision alignment to a seen target)
+#
+# How to load it:
+#   ros2 launch sendero sendero.launch.py params_file:=<this file>
+#
+# Section 1 is robot-specific and MUST be reviewed for a new robot.
+# Sections 2-10 are behavior settings with conservative starting values.
+# None of the values below is experimentally optimized for your platform:
+# tune them in simulation first, then on the robot.
+#
+# Units: metres, seconds, radians unless the name says otherwise (_hz).
+# Lists must not be empty. Outside section 3, every line shows the code
+# default, so a deleted line keeps the same behavior. Section 3 defines three
+# example profiles (the code default is a single profile named "default").
+# =============================================================================
+
+/**:
+  ros__parameters:
+
+    # =========================================================================
+    # 1. ROBOT / SYSTEM INTERFACES  —  edit these for your robot
+    # =========================================================================
+
+    # Frames. global_frame is the SLAM map; odom_frame is the smooth odometry
+    # frame (parent of the base). Obstacles and alignment targets are tracked
+    # in odom, so a SLAM correction (loop closure) does not smear them.
+    # odom_frame: "" -> the robot pose is read directly as global -> base.
+    global_frame: map
+    odom_frame: odom
+    robot_base_frame: base_link
+
+    # Occupancy grid from SLAM. true = TRANSIENT_LOCAL subscription
+    # (slam_toolbox, map_server, Cartographer and most custom SLAM nodes).
+    map_topic: /map
+    map_qos_transient_local: true
+
+    # Planar range sensors used for obstacles and the safety monitor. Each
+    # scan's frame must be in TF (base -> laser).
+    scan_topics:
+      - /scan
+
+    # Velocity output. cmd_vel_stamped: true publishes TwistStamped
+    # (Nav2 Jazzy style), false publishes Twist.
+    cmd_vel_topic: /cmd_vel
+    cmd_vel_stamped: false
+
+    # differential      -> commands use linear.x and angular.z
+    # omnidirectional   -> also linear.y (set max_vel_y > 0)
+    motion_model: differential
+
+    # Action servers. "" disables compute_path / backup / align.
+    navigate_action: /navigate_to_pose
+    compute_path_action: /compute_path_to_pose
+    backup_action: /backup
+    align_action: /align
+    # A PoseStamped here starts a navigation goal (RViz "2D Goal Pose");
+    # the outcome is reported on the status / events topics. "" disables it.
+    goal_pose_topic: /goal_pose
+
+    # Footprint in the base frame. Either a polygon (Nav2 syntax)
+    #   footprint: "[[0.25, 0.18], [0.25, -0.18], [-0.20, -0.18], [-0.20, 0.18]]"
+    # or "" for a circle of robot_radius. Include anything that sticks out
+    # (forks, bumpers). footprint_padding is added on every side for planning
+    # and control; the safety monitor and the scan self-filter use the
+    # footprint without padding.
+    footprint: ""
+    robot_radius: 0.2
+    footprint_padding: 0.05
+
+    # Velocity limits [m/s, rad/s]. min_vel_x is the reverse limit (<= 0):
+    # used by backup, recovery and alignment only; path following drives
+    # forward. max_vel_y only matters for an omnidirectional base.
+    max_vel_x: 0.2
+    min_vel_x: -0.1
+    max_vel_y: 0.0
+    max_vel_theta: 1.0
+    # Smallest rotation speed commanded in place (overcomes static friction).
+    min_rotation_speed: 0.1
+
+    # Acceleration limits [m/s^2, rad/s^2]; deceleration may be stronger.
+    acc_lim_x: 0.5
+    acc_lim_y: 0.5
+    acc_lim_theta: 1.5
+    decel_lim_x: 1.0
+    decel_lim_y: 1.0
+    decel_lim_theta: 3.0
+
+    # =========================================================================
+    # 2. FRAMEWORK TOPICS  (normally unchanged)
+    # =========================================================================
+    status_topic: /navigation/status       # out: one-word state, status_rate_hz
+    stats_topic: /navigation/stats         # out: key=value CSV, status_rate_hz
+    events_topic: /navigation/events       # out: one JSON object per decision/outcome
+    control_topic: /navigation/control     # in : PAUSE | RESUME | CANCEL | CLEAR_COSTMAPS
+    plan_topic: /navigation/plan           # out: nav_msgs/Path (latched)
+    global_costmap_topic: /navigation/global_costmap   # out: OccupancyGrid 0..100 (latched)
+    local_costmap_topic: /navigation/local_costmap     # out: OccupancyGrid 0..100
+    markers_topic: /navigation/markers     # out: footprint, lookahead, alignment goal
+    # 0 disables a costmap publication.
+    global_costmap_publish_period_s: 2.0
+    local_costmap_publish_period_s: 0.5
+    status_rate_hz: 1.0
+
+    # =========================================================================
+    # 3. NAVIGATION PROFILES
+    # =========================================================================
+    # A profile overrides some settings for one kind of motion. A goal selects
+    # it through NavigateToPose.behavior_tree (or ComputePathToPose.planner_id,
+    # or Align.profile); an empty string selects default_profile. The profile
+    # chosen by the last goal stays active (its footprint is used for the scan
+    # self-filter) until another goal changes it.
+    #
+    # Fields a profile may set:
+    #   footprint robot_radius footprint_padding
+    #   max_vel_x min_vel_x max_vel_y max_vel_theta
+    #   acc_lim_x acc_lim_y acc_lim_theta decel_lim_x decel_lim_y decel_lim_theta
+    #   inflation_radius cost_scaling_factor allow_unknown unknown_cost
+    #   goal_search_radius xy_goal_tolerance yaw_goal_tolerance ignore_goal_yaw
+    #   safety_stop_margin safety_slow_margin
+    #   proximity_slowdown_distance approach_distance
+    # Anything not set keeps the base value from this file.
+    profile_names: [exploration, transport, carrying]
+    default_profile: exploration
+    # A goal naming an unknown profile: "default" -> use default_profile
+    # (and report it), "reject" -> reject the goal.
+    unknown_profile_policy: default
+
+    profiles:
+      # Frontier exploration (Frontera sends behavior_tree = ""): plan through
+      # unknown space, any final heading is fine.
+      exploration:
+        allow_unknown: true
+        ignore_goal_yaw: true
+      # Driving on a finished map: never plan into unknown space; arrive with
+      # the requested heading.
+      transport:
+        allow_unknown: false
+        ignore_goal_yaw: false
+      # Carrying a load: slower and gentler. Set the loaded footprint here if
+      # the load sticks out of the robot.
+      carrying:
+        allow_unknown: false
+        max_vel_x: 0.1
+        max_vel_theta: 0.6
+        acc_lim_x: 0.25
+        acc_lim_theta: 0.8
+
+    # =========================================================================
+    # 4. MAP AND COSTMAPS
+    # =========================================================================
+    # Occupancy values >= occupied_threshold are obstacles, <= free_threshold
+    # free, in between (and -1) unknown. Probability maps (0..100) and
+    # trinary maps (-1 / 0 / 100) both work.
+    occupied_threshold: 65
+    free_threshold: 50
+
+    # Inflation (Nav2 semantics): cost 253 within the footprint's inscribed
+    # radius of an obstacle, then 252 * exp(-cost_scaling_factor * (d - r_in))
+    # out to inflation_radius. A larger radius / smaller factor keeps paths
+    # farther from walls.
+    inflation_radius: 0.45
+    cost_scaling_factor: 6.0
+
+    # Unknown cells: plannable when allow_unknown is true (exploration), at
+    # the cost unknown_cost (0..252).
+    allow_unknown: true
+    unknown_cost: 80.0
+
+    # Plan on a coarser grid (2 = twice the map cell size): faster on large maps.
+    global_downsample: 1
+    # Add recent sensor obstacles (not yet in the map) to the planner's costmap,
+    # kept for global_obstacle_decay_s.
+    global_obstacles_enabled: true
+    global_obstacle_decay_s: 3.0
+
+    # Local costmap: a rolling window around the robot built from the last
+    # local_obstacle_decay_s of scans (moving obstacles disappear after it).
+    # local_use_static_map also adds the SLAM map's obstacles.
+    local_costmap_size: 4.0
+    local_costmap_resolution: 0.05
+    local_obstacle_decay_s: 0.6
+    local_use_static_map: false
+
+    # Scan processing: returns outside [min, max] range are not obstacles;
+    # use every scan_beam_step-th beam; thin points on an obstacle_voxel grid.
+    obstacle_min_range: 0.05
+    obstacle_max_range: 4.0
+    scan_beam_step: 1
+    obstacle_voxel: 0.03
+    # Returns within this distance of the (unpadded) footprint are the robot
+    # itself (forks, mast) and are dropped.
+    self_filter_margin: 0.02
+    # If TF has no odom pose at a scan's exact stamp, the newest one is used
+    # when it is at most this far from the stamp.
+    scan_tf_tolerance_s: 0.2
+    # Sensor mounting [x, y, yaw] in the base frame, used ONLY when TF has no
+    # base -> sensor transform and use_scan_mount_fallback is true. Prefer a
+    # static transform publisher.
+    use_scan_mount_fallback: false
+    scan_mount_fallback: [0.0, 0.0, 0.0]
+
+    # =========================================================================
+    # 5. GLOBAL PLANNER
+    # =========================================================================
+    # "dijkstra": SciPy's compiled Dijkstra (fast, needs SciPy);
+    # "astar": pure-Python A*; "auto": dijkstra if SciPy is installed.
+    planner_backend: auto
+    # Plan in a worker thread so control continues while replanning.
+    planner_threaded: true
+    # Step cost = length * (1 + planner_cost_weight * cell_cost / 252).
+    planner_cost_weight: 3.0
+    # A* only: give up after this long (reported as TIMEOUT).
+    planner_timeout_s: 2.0
+    # A blocked goal / start is moved to the nearest free cell within these.
+    goal_search_radius: 0.5
+    start_search_radius: 0.6
+    # Line-of-sight smoothing; a shortcut may raise the path's cost by at most
+    # smoothing_cost_tolerance (so smoothing never cuts close to walls).
+    path_smoothing: true
+    smoothing_cost_tolerance: 10.0
+    path_resolution: 0.05
+    # Replan every replan_period_s while driving (0 = only when needed), but
+    # never more often than replan_min_interval_s.
+    replan_period_s: 2.0
+    replan_min_interval_s: 0.5
+    # Consecutive "no path" results (on the map alone) before aborting.
+    plan_failure_tolerance: 2
+
+    # =========================================================================
+    # 6. PATH FOLLOWING  (Regulated Pure Pursuit)
+    # =========================================================================
+    controller_frequency: 10.0
+    # Lookahead = speed * lookahead_time, clamped to [min, max].
+    lookahead_time: 1.5
+    min_lookahead: 0.3
+    max_lookahead: 0.9
+    # Differential drive: rotate in place first if the lookahead point is
+    # more than this angle off the heading.
+    use_rotate_to_heading: true
+    rotate_to_heading_angle: 0.785
+    rotation_kp: 1.5
+    # Omnidirectional: heading gain, and face the path (true) or keep the
+    # goal heading (false) while driving.
+    heading_kp: 1.5
+    omni_face_path: true
+    # Slow down on curves tighter than this radius.
+    regulated_min_radius: 0.6
+    min_regulated_speed: 0.05
+    # Slow down when the footprint is closer than this to an obstacle, to at
+    # least proximity_min_scale of the speed.
+    proximity_slowdown_distance: 0.25
+    proximity_min_scale: 0.4
+    # Slow down over the last approach_distance of the path.
+    approach_distance: 0.5
+    min_approach_speed: 0.05
+    # The command is projected this far ahead and checked against the local
+    # costmap; a collision stops the robot (BLOCKED).
+    collision_check_time: 1.0
+    # The path is checked this far ahead; a new obstacle on it triggers a replan.
+    path_check_distance: 1.5
+    # Farther than this from the path -> replan.
+    max_path_deviation: 0.5
+    # Goal reached when within xy_goal_tolerance and (unless ignore_goal_yaw)
+    # within yaw_goal_tolerance of the goal heading.
+    xy_goal_tolerance: 0.15
+    yaw_goal_tolerance: 0.15
+    ignore_goal_yaw: false
+
+    # =========================================================================
+    # 7. GOAL SUPERVISION AND RECOVERY
+    # =========================================================================
+    # A new goal while one is active: "preempt" (Nav2 behavior: the old goal
+    # is aborted) or "reject".
+    goal_policy: preempt
+
+    # No progress = moved less than progress_min_distance and turned less
+    # than progress_min_rotation for progress_timeout_s -> recovery.
+    progress_timeout_s: 10.0
+    progress_min_distance: 0.10
+    progress_min_rotation: 0.35
+    # A predicted collision (BLOCKED) is waited out this long while
+    # replanning around it, then a recovery starts.
+    blocked_wait_s: 2.0
+    # Where the robot was blocked is avoided by the planner for this long, so
+    # a passage it could not get through is not chosen again (0 = off).
+    blocked_memory_s: 20.0
+    # Abort a goal after this long (0 = no limit; let the client decide).
+    max_goal_time_s: 0.0
+
+    # Recoveries are tried in this order (cycling), at most max_recoveries
+    # per goal; then the goal is aborted. Known: clear, wait, backup, spin.
+    #   clear  forget the sensor-obstacle history
+    #   wait   stand still recovery_wait_s
+    #   backup reverse backup_distance at backup_speed (only into free space)
+    #   spin   rotate spin_angle at spin_speed
+    recovery_behaviors: [clear, wait, backup, spin]
+    max_recoveries: 4
+    recovery_wait_s: 3.0
+    backup_distance: 0.15
+    backup_speed: 0.05
+    spin_angle: 1.57
+    spin_speed: 0.6
+    recovery_time_allowance_s: 10.0
+
+    # =========================================================================
+    # 8. SAFETY MONITOR  (raw scans, independent of costmaps and planning)
+    # =========================================================================
+    # Every command is simulated safety_horizon_s ahead against the newest
+    # scan points. A point the motion approaches within safety_stop_margin of
+    # the (unpadded) footprint stops the robot; within safety_slow_margin the
+    # linear speed is multiplied by safety_slow_factor. No scan newer than
+    # scan_timeout_s stops the robot. A stop lasting safety_block_s while
+    # following a path is handled like a blocked path.
+    # Keep safety_stop_margin below footprint_padding: the costmap then keeps
+    # the robot out of the stop zone in normal operation.
+    safety_enabled: true
+    safety_stop_margin: 0.02
+    safety_slow_margin: 0.08
+    safety_slow_factor: 0.5
+    safety_horizon_s: 0.6
+    safety_block_s: 1.0
+    scan_timeout_s: 0.5
+
+    # =========================================================================
+    # 9. PRECISION ALIGNMENT  (sendero_msgs/action/Align)
+    # =========================================================================
+    # Speeds while aligning.
+    align_max_vel_x: 0.08
+    align_max_vel_y: 0.08
+    align_max_vel_theta: 0.4
+    align_min_vel_x: 0.01
+    align_min_rotation_speed: 0.05
+    # Default tolerances (a goal may override them).
+    align_xy_tolerance: 0.02
+    align_yaw_tolerance: 0.035
+    # Differential drive: first reach a pre-pose align_standoff behind the
+    # final pose on its approach line (polar pose controller), then drive
+    # straight in (DOCK), then correct the heading (ROTATE).
+    align_standoff: 0.25
+    align_approach_xy_tolerance: 0.04
+    align_approach_yaw_tolerance: 0.10
+    # Polar controller gains: need k_rho > 0, k_beta < 0, k_alpha > k_rho.
+    align_k_rho: 0.6
+    align_k_alpha: 1.8
+    align_k_beta: -0.6
+    # Docking gains (longitudinal speed, lateral and heading correction).
+    align_k_longitudinal: 1.0
+    align_k_lateral: 3.0
+    align_k_heading: 1.5
+    # Re-approaches allowed when the lateral error remains at the end.
+    align_max_reapproaches: 2
+    # Target filter: weight of a new measurement (0..1], outlier distance.
+    align_target_filter_gain: 0.3
+    align_target_jump_reject: 0.3
+    # No measurement for align_target_timeout_s -> hold still;
+    # for align_target_lost_s -> abort (TARGET_LOST).
+    align_target_timeout_s: 1.0
+    align_target_lost_s: 5.0
+    # No first measurement within this -> abort (TARGET_NOT_FOUND).
+    align_wait_for_target_s: 3.0
+    # Refuse to align from farther than this (navigate closer first).
+    align_max_start_distance: 1.5
+    align_time_allowance_s: 60.0
+    # While aligning, scan points within this distance of the target are
+    # ignored by the safety monitor (the robot must get close to it), and the
+    # rest use align_stop_margin.
+    align_ignore_target_radius: 0.35
+    align_stop_margin: 0.01
+
+    # =========================================================================
+    # 10. TIMING, TF, DIAGNOSTICS
+    # =========================================================================
+    # The odom -> base transform must be at most this old (ROS time).
+    pose_timeout_s: 0.5
+    # Maximum age of map -> odom (0 = no limit: some SLAM systems publish it
+    # only when they process a scan).
+    map_odom_timeout_s: 0.0
+    # Pose unavailable this long during a goal -> abort (TF_ERROR).
+    localization_lost_timeout_s: 3.0
+    # No map this long after a goal arrives -> abort.
+    map_wait_timeout_s: 10.0
+    # A pose jump larger than this (a SLAM correction) triggers a replan.
+    pose_jump_replan_m: 0.25
+    feedback_rate_hz: 5.0
+    log_events: true
